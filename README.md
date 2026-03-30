@@ -1,0 +1,60 @@
+# cli-ai-tools
+
+Container images and `inject-tool` CLI for injecting AI CLI tools into Eclipse Che DevWorkspaces via init containers.
+
+## Tool Images
+
+| Tool | Pattern | Image | Architectures |
+|------|---------|-------|---------------|
+| opencode | init | `quay.io/che-incubator/tools-injector/opencode:latest` | amd64, arm64 |
+| goose | init | `quay.io/che-incubator/tools-injector/goose:latest` | amd64, arm64 |
+| claude-code | init | `quay.io/che-incubator/tools-injector/claude-code:latest` | amd64, arm64 |
+| gemini-cli | bundle | `quay.io/che-incubator/tools-injector/gemini-cli:latest` | amd64, arm64 |
+| kilocode | bundle | `quay.io/che-incubator/tools-injector/kilocode:latest` | amd64, arm64 |
+| tmux | init | `quay.io/che-incubator/tools-injector/tmux:latest` | amd64, arm64 |
+
+**Init pattern**: Single binary copied to a shared volume via preStart init container.
+**Bundle pattern**: Node.js tool + runtime bundled at `/opt/<tool>/`, copied via init container.
+
+## inject-tool CLI
+
+A Python3 CLI (deployed via ConfigMap) that automates tool injection into running DevWorkspaces:
+
+```bash
+inject-tool list              # List available tools
+inject-tool <tool>            # Inject a tool
+inject-tool remove <tool>     # Remove an injected tool
+inject-tool <tool> --hot      # Hot-inject into running workspace
+```
+
+Features:
+- Auto PATH setup via `$HOME/.bashrc`
+- Auto env vars per tool (TOOL_ENV registry)
+- Auto config pre-seeding (TOOL_SETUP registry)
+- Auto memory bump +512Mi for bundle tools
+
+See [inject-tool/README.md](inject-tool/README.md) for details.
+
+## Building
+
+```bash
+# Build a single tool for current platform
+make docker-build-local-opencode
+
+# Build multi-arch (amd64+arm64), no push
+make docker-build-opencode
+
+# Build and push multi-arch (requires docker buildx + registry login)
+make docker-opencode
+
+# Build all tools
+make docker-build-all
+```
+
+## Vertex AI Authentication
+
+See [docs/vertex-ai-setup.md](docs/vertex-ai-setup.md) for setting up Google Cloud ADC authentication in DevWorkspaces.
+
+## License
+
+[EPL-2.0](LICENSE)
