@@ -49,4 +49,4 @@ COPY --from=libgomp /out/libgomp.so* /usr/lib64/
 COPY --from=builder /usr/local/bin/goose /usr/local/bin/goose
 
 LABEL org.opencontainers.image.description="Goose CLI tool for DevWorkspace injection" \
-      org.opencontainers.image.source="https://github.com/che-incubator/cli-ai-tools"
+      org.opencontainers.image.source="https://github.com/akurinnoy/tools-injector"

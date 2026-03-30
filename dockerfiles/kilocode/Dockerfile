@@ -19,4 +19,4 @@ FROM registry.access.redhat.com/ubi10/ubi-minimal:10.0
 COPY --from=builder /bundle /opt/kilocode
 
 LABEL org.opencontainers.image.description="Kilo Code CLI init container for DevWorkspace injection" \
-      org.opencontainers.image.source="https://github.com/che-incubator/cli-ai-tools"
+      org.opencontainers.image.source="https://github.com/akurinnoy/tools-injector"

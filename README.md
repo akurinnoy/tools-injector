@@ -1,4 +1,4 @@
-# cli-ai-tools
+# tools-injector
 
 Container images and `inject-tool` CLI for injecting AI CLI tools into Eclipse Che DevWorkspaces via init containers.
 

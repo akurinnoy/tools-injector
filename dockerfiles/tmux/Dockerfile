@@ -34,4 +34,4 @@ COPY --from=builder /usr/local/bin/tmux /usr/local/bin/tmux
 COPY --from=builder /usr/local/lib64/libevent*.so* /usr/lib64/
 
 LABEL org.opencontainers.image.description="tmux init container for DevWorkspace injection" \
-      org.opencontainers.image.source="https://github.com/che-incubator/cli-ai-tools"
+      org.opencontainers.image.source="https://github.com/akurinnoy/tools-injector"

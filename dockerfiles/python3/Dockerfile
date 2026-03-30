@@ -25,4 +25,4 @@ COPY --from=builder /usr/local/lib/libpython* /usr/lib64/
 ENV PYTHONHOME=/usr/local
 
 LABEL org.opencontainers.image.description="Python3 runtime for DevWorkspace tool injection" \
-      org.opencontainers.image.source="https://github.com/che-incubator/cli-ai-tools"
+      org.opencontainers.image.source="https://github.com/akurinnoy/tools-injector"

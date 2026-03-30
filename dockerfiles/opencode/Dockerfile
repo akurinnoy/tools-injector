@@ -26,4 +26,4 @@ FROM registry.access.redhat.com/ubi10/ubi-minimal:10.0
 COPY --from=builder /usr/local/bin/opencode /usr/local/bin/opencode
 
 LABEL org.opencontainers.image.description="Opencode CLI tool for DevWorkspace injection" \
-      org.opencontainers.image.source="https://github.com/che-incubator/cli-ai-tools"
+      org.opencontainers.image.source="https://github.com/akurinnoy/tools-injector"
