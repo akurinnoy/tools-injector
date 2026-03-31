@@ -34,12 +34,12 @@ Alpine is used for builder stages because UBI10 requires x86-64-v3 which QEMU ca
 
 ### inject-tool Internals
 
-The tool registry is a Python dict in `inject-tool.py`:
-```
-TOOLS = {"tool": {"pattern": "...", "image": "...", "src": "...", "binary": "..."}}
-```
+The tool registry is `inject-tool/registry.json`:
+- `registry`, `tag` — default image registry and tag (overridable via `INJECT_TOOL_REGISTRY`/`INJECT_TOOL_TAG` env vars)
+- `infrastructure.patch` — RFC 6902 ops for the shared `injected-tools` volume
+- `tools.<name>` — per-tool: `description`, `pattern`, `src`, `binary`, `patch` (append-only init container ops), `editor` (volumeMounts, env, postStart)
 
-Per-tool env vars (`TOOL_ENV[]`) and setup commands (`TOOL_SETUP[]`) are also hardcoded in the same file.
+`inject-tool.py` loads `registry.json` at startup from the same directory (override path with `INJECT_TOOL_REGISTRY_FILE` env var for testing).
 
 **Patching flow**: validate tools → extract auth token from KUBECONFIG (falls back to service account token) → fetch DevWorkspace CR from Kubernetes API → build inject ops per tool (first with infra, rest skip_infra) → merge into single JSON Patch array → PATCH via API → workspace restarts.
 
