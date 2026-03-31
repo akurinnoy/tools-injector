@@ -62,7 +62,7 @@ Both push to `quay.io/okurinny/tools-injector/<tool>`.
 
 1. Create `dockerfiles/<tool>/Dockerfile` following init or bundle pattern
 2. Add tool name to `TOOLS` list in `Makefile`
-3. Add registry entry in `inject-tool.py` (`TOOLS` dict, optionally `TOOL_ENV` and `TOOL_SETUP` dicts)
+3. Add registry entry in `inject-tool/registry.json` (`tools.<name>` with `description`, `pattern`, `src`, `binary`, `patch`, `editor`)
 4. PR triggers CI multi-arch build; merge pushes `:latest`
 
 ## No Automated Tests
