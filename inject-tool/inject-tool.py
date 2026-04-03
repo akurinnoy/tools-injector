@@ -242,9 +242,12 @@ def parse_args():
     remove_p.add_argument("tools", nargs="+", metavar="tool")
     remove_p.add_argument("--hot", action="store_true", help="Remove hot-injected binary only (one tool only)")
 
+    init_p = sub.add_parser("init", help="Inject tools declared in .che/inject-tools.json")
+    init_p.add_argument("--dry-run", action="store_true", help="Show what would be injected without patching")
+
     # Handle bare tool names: "inject-tool opencode" → "inject-tool inject opencode"
     argv = sys.argv[1:]
-    known_commands = {"inject", "list", "remove"}
+    known_commands = {"inject", "list", "remove", "init"}
     if argv and argv[0] not in known_commands and not argv[0].startswith("-"):
         argv = ["inject"] + argv
 
@@ -578,6 +581,10 @@ def cmd_remove(tools, hot):
     info(f"Removed {tool_names}. Workspace is restarting...")
 
 
+def cmd_init(dry_run):
+    info("init is not yet implemented.")
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -592,6 +599,8 @@ def main():
     elif args.command == "remove":
         validate_tools(args.tools)
         cmd_remove(args.tools, args.hot)
+    elif args.command == "init":
+        cmd_init(args.dry_run)
 
 
 if __name__ == "__main__":
