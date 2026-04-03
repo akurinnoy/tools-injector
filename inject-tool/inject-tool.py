@@ -307,6 +307,109 @@ def load_inject_config(config_path):
     return data
 
 
+def build_custom_tool_entry(tool_def):
+    """Convert a custom tool object from .che/inject-tools.json into a
+    registry-compatible tool entry that build_inject_ops() can consume.
+    """
+    for field in ("name", "image", "binaries"):
+        if field not in tool_def:
+            die(f"Custom tool definition missing required field '{field}': {json.dumps(tool_def)}")
+
+    if not isinstance(tool_def["binaries"], list) or not tool_def["binaries"]:
+        die(f"Custom tool '{tool_def['name']}': 'binaries' must be a non-empty array")
+
+    for b in tool_def["binaries"]:
+        if "src" not in b or "binary" not in b:
+            die(f"Custom tool '{tool_def['name']}': each binary entry needs 'src' and 'binary'")
+
+    name = tool_def["name"]
+    image = tool_def["image"]
+    binaries = tool_def["binaries"]
+    mem_limit = tool_def.get("memoryLimit", "128Mi")
+
+    # Build the init container command
+    if len(binaries) == 1:
+        command = ["/bin/cp"]
+        args = [binaries[0]["src"], f"/injected-tools/{binaries[0]['binary']}"]
+    else:
+        srcs = " ".join(b["src"] for b in binaries)
+        command = ["/bin/sh"]
+        args = ["-c", f"cp {srcs} /injected-tools/"]
+
+    patch = [{
+        "op": "add",
+        "path": "/spec/template/components/-",
+        "value": {
+            "name": f"{name}-injector",
+            "container": {
+                "image": image,
+                "command": command,
+                "args": args,
+                "memoryLimit": mem_limit,
+                "mountSources": False,
+                "volumeMounts": [{"name": "injected-tools", "path": "/injected-tools"}],
+            },
+        },
+    }]
+
+    # Use the first binary as the primary (for existing build_inject_ops logic)
+    return {
+        "description": tool_def.get("description", f"{name} (custom)"),
+        "pattern": "init",
+        "src": binaries[0]["src"],
+        "binary": binaries[0]["binary"],
+        "patch": patch,
+        "editor": {
+            "volumeMounts": [{"name": "injected-tools", "path": "/injected-tools"}],
+            "env": tool_def.get("env", []),
+            "postStart": tool_def.get("postStart", ""),
+        },
+        "_binaries": binaries,
+    }
+
+
+def resolve_tools(configs):
+    """Resolve all tool declarations from config files.
+
+    Returns a list of (tool_name, tool_entry_or_None) tuples.
+    - Registry tools: (name, None) — looked up from REGISTRY_DATA at inject time.
+    - Custom tools: (name, dict) — the registry-compatible entry.
+
+    Deduplicates by name (first occurrence wins).
+    """
+    seen = set()
+    resolved = []
+
+    for config_path in configs:
+        data = load_inject_config(config_path)
+        for item in data["tools"]:
+            if isinstance(item, str):
+                # Registry tool reference
+                if item in seen:
+                    continue
+                if item not in REGISTRY_DATA["tools"]:
+                    die(f"{config_path}: unknown tool '{item}'. "
+                        f"Available: {', '.join(sorted(REGISTRY_DATA['tools']))}")
+                seen.add(item)
+                resolved.append((item, None))
+
+            elif isinstance(item, dict):
+                # Custom tool definition
+                name = item.get("name")
+                if not name:
+                    die(f"{config_path}: custom tool missing 'name': {json.dumps(item)}")
+                if name in seen:
+                    continue
+                entry = build_custom_tool_entry(item)
+                seen.add(name)
+                resolved.append((name, entry))
+
+            else:
+                die(f"{config_path}: each tool must be a string or object, got: {type(item).__name__}")
+
+    return resolved
+
+
 def cmd_list():
     validate_env()
     ws = fetch_workspace()
@@ -636,6 +739,15 @@ def cmd_init(dry_run):
 
     for config_path in configs:
         info(f"Found config: {config_path}")
+
+    resolved = resolve_tools(configs)
+    if not resolved:
+        info("No tools declared in config files.")
+        return
+
+    for name, entry in resolved:
+        kind = "custom" if entry else "registry"
+        info(f"  {name} ({kind})")
 
 
 # ============================================================================
