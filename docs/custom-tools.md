@@ -2,6 +2,20 @@
 
 This guide explains how to inject custom CLI tools (tools not in the central registry) into your DevWorkspace without modifying the tools-injector project.
 
+## Requirements
+
+**Workspace image:** The workspace container must be based on UBI10 (or UDI10, which is built on UBI10). Other base images (Alpine, Debian, etc.) are not supported.
+
+**Why:** inject-tool requires `python3` to run, and the init-container pattern copies binaries built against glibc. UBI10/UDI10 provides a compatible glibc environment and standard Linux filesystem layout.
+
+**`inject-tool init` prerequisites:**
+
+- The workspace must be created from a Git URL (via Che Dashboard) so that project sources are cloned into `/projects/`
+- The workspace container must have `mountSources: true` (default for UDI-based workspaces)
+- The repository must contain a `.che/inject-tools.json` file
+
+If `/projects/` is not available (e.g., `mountSources: false`), `inject-tool init` will report "Nothing to do." Use `inject-tool <tool>` to inject registry tools directly instead.
+
 ## Overview
 
 Custom tools let you inject any CLI binary into your DevWorkspace by defining them in `.che/inject-tools.json` in your repository. This is useful for:
