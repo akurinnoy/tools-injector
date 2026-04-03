@@ -35,8 +35,7 @@ jobs:
             dockerfile: dockerfiles/python3
     env:
       IMAGE: quay.io/akurinnoy/tools-injector/${{ matrix.tool.name }}
-      TAG: ${{ github.head_ref }}
-
+      TAG: pr-${{ github.event.pull_request.number }}
     steps:
       -
         name: "Checkout source code"
