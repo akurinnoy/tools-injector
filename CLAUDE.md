@@ -45,6 +45,8 @@ The tool registry is `inject-tool/registry.json`:
 
 **Multi-tool**: `inject-tool opencode goose tmux` builds patches for each tool, merges into one API call, one restart. `--hot` stays single-tool only.
 
+**Init mode** (`inject-tool init`): scans `/projects/*/.che/inject-tools.json` for tool declarations. Supports registry tool names (strings) and custom tool definitions (objects with `name`, `image`, `binaries`). Builds a single JSON Patch and applies it — one restart on first use, idempotent after. Override config path with `INJECT_TOOLS_CONFIG` env var. Use `--dry-run` to preview.
+
 **Hot-inject mode** (`inject-tool <tool> --hot`): uses `oc image extract` to pull binary directly without restart. Init-pattern tools only. Not persistent across restarts.
 
 ### Deployment
