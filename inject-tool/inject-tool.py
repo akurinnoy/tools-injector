@@ -242,9 +242,12 @@ def parse_args():
     remove_p.add_argument("tools", nargs="+", metavar="tool")
     remove_p.add_argument("--hot", action="store_true", help="Remove hot-injected binary only (one tool only)")
 
+    init_p = sub.add_parser("init", help="Inject tools declared in .che/inject-tools.json")
+    init_p.add_argument("--dry-run", action="store_true", help="Show what would be injected without patching")
+
     # Handle bare tool names: "inject-tool opencode" → "inject-tool inject opencode"
     argv = sys.argv[1:]
-    known_commands = {"inject", "list", "remove"}
+    known_commands = {"inject", "list", "remove", "init"}
     if argv and argv[0] not in known_commands and not argv[0].startswith("-"):
         argv = ["inject"] + argv
 
@@ -259,6 +262,154 @@ def parse_args():
 # ============================================================================
 # Commands
 # ============================================================================
+PROJECTS_DIR = "/projects"
+
+
+def discover_configs():
+    """Find .che/inject-tools.json files in workspace projects.
+
+    Returns a list of file paths, sorted alphabetically by parent directory.
+    """
+    override = os.environ.get("INJECT_TOOLS_CONFIG")
+    if override:
+        if not os.path.isfile(override):
+            die(f"INJECT_TOOLS_CONFIG points to non-existent file: {override}")
+        return [override]
+
+    configs = []
+    if not os.path.isdir(PROJECTS_DIR):
+        return configs
+
+    for entry in sorted(os.listdir(PROJECTS_DIR)):
+        config_path = os.path.join(PROJECTS_DIR, entry, ".che", "inject-tools.json")
+        if os.path.isfile(config_path):
+            configs.append(config_path)
+
+    return configs
+
+
+def load_inject_config(config_path):
+    """Load and validate a .che/inject-tools.json file.
+
+    Returns the parsed JSON data.
+    """
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+    except OSError as e:
+        die(f"Cannot read config file {config_path}: {e}")
+    except json.JSONDecodeError as e:
+        die(f"Invalid JSON in {config_path}: {e}")
+
+    if "tools" not in data or not isinstance(data["tools"], list):
+        die(f"{config_path}: missing or invalid 'tools' array")
+
+    return data
+
+
+def build_custom_tool_entry(tool_def):
+    """Convert a custom tool object from .che/inject-tools.json into a
+    registry-compatible tool entry that build_inject_ops() can consume.
+    """
+    for field in ("name", "image", "binaries"):
+        if field not in tool_def:
+            die(f"Custom tool definition missing required field '{field}': {json.dumps(tool_def)}")
+
+    if not isinstance(tool_def["binaries"], list) or not tool_def["binaries"]:
+        die(f"Custom tool '{tool_def['name']}': 'binaries' must be a non-empty array")
+
+    for b in tool_def["binaries"]:
+        if "src" not in b or "binary" not in b:
+            die(f"Custom tool '{tool_def['name']}': each binary entry needs 'src' and 'binary'")
+
+    name = tool_def["name"]
+    image = tool_def["image"]
+    binaries = tool_def["binaries"]
+    mem_limit = tool_def.get("memoryLimit", "128Mi")
+
+    # Build the init container command
+    if len(binaries) == 1:
+        command = ["/bin/cp"]
+        args = [binaries[0]["src"], f"/injected-tools/{binaries[0]['binary']}"]
+    else:
+        srcs = " ".join(b["src"] for b in binaries)
+        command = ["/bin/sh"]
+        args = ["-c", f"cp {srcs} /injected-tools/"]
+
+    patch = [{
+        "op": "add",
+        "path": "/spec/template/components/-",
+        "value": {
+            "name": f"{name}-injector",
+            "container": {
+                "image": image,
+                "command": command,
+                "args": args,
+                "memoryLimit": mem_limit,
+                "mountSources": False,
+                "volumeMounts": [{"name": "injected-tools", "path": "/injected-tools"}],
+            },
+        },
+    }]
+
+    # Use the first binary as the primary (for existing build_inject_ops logic)
+    return {
+        "description": tool_def.get("description", f"{name} (custom)"),
+        "pattern": "init",
+        "src": binaries[0]["src"],
+        "binary": binaries[0]["binary"],
+        "patch": patch,
+        "editor": {
+            "volumeMounts": [{"name": "injected-tools", "path": "/injected-tools"}],
+            "env": tool_def.get("env", []),
+            "postStart": tool_def.get("postStart", ""),
+        },
+        "_binaries": binaries,
+    }
+
+
+def resolve_tools(configs):
+    """Resolve all tool declarations from config files.
+
+    Returns a list of (tool_name, tool_entry_or_None) tuples.
+    - Registry tools: (name, None) — looked up from REGISTRY_DATA at inject time.
+    - Custom tools: (name, dict) — the registry-compatible entry.
+
+    Deduplicates by name (first occurrence wins).
+    """
+    seen = set()
+    resolved = []
+
+    for config_path in configs:
+        data = load_inject_config(config_path)
+        for item in data["tools"]:
+            if isinstance(item, str):
+                # Registry tool reference
+                if item in seen:
+                    continue
+                if item not in REGISTRY_DATA["tools"]:
+                    die(f"{config_path}: unknown tool '{item}'. "
+                        f"Available: {', '.join(sorted(REGISTRY_DATA['tools']))}")
+                seen.add(item)
+                resolved.append((item, None))
+
+            elif isinstance(item, dict):
+                # Custom tool definition
+                name = item.get("name")
+                if not name:
+                    die(f"{config_path}: custom tool missing 'name': {json.dumps(item)}")
+                if name in seen:
+                    continue
+                entry = build_custom_tool_entry(item)
+                seen.add(name)
+                resolved.append((name, entry))
+
+            else:
+                die(f"{config_path}: each tool must be a string or object, got: {type(item).__name__}")
+
+    return resolved
+
+
 def cmd_list():
     validate_env()
     ws = fetch_workspace()
@@ -271,8 +422,8 @@ def cmd_list():
         print(f"{tool:<15s} {pattern:<10s} {status}")
 
 
-def build_inject_ops(tool, ws, skip_infra=False):
-    reg_tool = REGISTRY_DATA["tools"][tool]
+def build_inject_ops(tool, ws, skip_infra=False, tool_entry=None):
+    reg_tool = tool_entry if tool_entry else REGISTRY_DATA["tools"][tool]
     pattern = reg_tool["pattern"]
     binary_name = reg_tool["binary"]
     ops = []
@@ -290,7 +441,7 @@ def build_inject_ops(tool, ws, skip_infra=False):
     for op in patch_ops:
         if op.get("op") == "add" and isinstance(op.get("value"), dict):
             container = op["value"].get("container", {})
-            if "image" in container:
+            if "image" in container and not tool_entry:
                 container["image"] = tool_image(tool)
     ops.extend(patch_ops)
 
@@ -363,10 +514,17 @@ def build_inject_ops(tool, ws, skip_infra=False):
     if editor_name:
         symlink_cmd_id = f"symlink-{tool}"
         if find_command_index(ws, symlink_cmd_id) is None:
-            if pattern == "init":
-                symlink_target = f"/injected-tools/{binary_name}"
-            else:
-                symlink_target = f"/injected-tools/{tool}/bin/{binary_name}"
+            # Collect all binaries to symlink
+            all_binaries = reg_tool.get("_binaries", [{"src": reg_tool["src"], "binary": binary_name}])
+
+            symlink_parts = []
+            for b in all_binaries:
+                b_name = b["binary"]
+                if pattern == "init":
+                    symlink_target = f"/injected-tools/{b_name}"
+                else:
+                    symlink_target = f"/injected-tools/{tool}/bin/{b_name}"
+                symlink_parts.append(f"ln -sf {symlink_target} /injected-tools/bin/{b_name}")
 
             path_cmd = (
                 'grep -q injected-tools /etc/profile.d/injected-tools.sh 2>/dev/null'
@@ -376,7 +534,7 @@ def build_inject_ops(tool, ws, skip_infra=False):
             )
             cmdline = (
                 f"mkdir -p /injected-tools/bin && "
-                f"ln -sf {symlink_target} /injected-tools/bin/{binary_name} && "
+                f"{' && '.join(symlink_parts)} && "
                 f"{path_cmd}"
             )
             setup_cmd = reg_tool["editor"].get("postStart", "")
@@ -578,6 +736,54 @@ def cmd_remove(tools, hot):
     info(f"Removed {tool_names}. Workspace is restarting...")
 
 
+def cmd_init(dry_run):
+    validate_env()
+
+    configs = discover_configs()
+    if not configs:
+        info("No .che/inject-tools.json found in /projects/*/. Nothing to do.")
+        return
+
+    for config_path in configs:
+        info(f"Found config: {config_path}")
+
+    resolved = resolve_tools(configs)
+    if not resolved:
+        info("No tools declared in config files.")
+        return
+
+    ws = fetch_workspace()
+
+    # Filter already-injected tools
+    to_inject = []
+    for name, entry in resolved:
+        if find_component_index(ws, f"{name}-injector") is not None:
+            info(f"{name} is already injected, skipping.")
+        else:
+            to_inject.append((name, entry))
+
+    if not to_inject:
+        info("All declared tools are already injected.")
+        return
+
+    if dry_run:
+        info("Dry run — the following tools would be injected:")
+        for name, entry in to_inject:
+            kind = "custom" if entry else "registry"
+            info(f"  {name} ({kind})")
+        return
+
+    # Build ops: first tool with infra, rest without
+    all_ops = []
+    for i, (name, entry) in enumerate(to_inject):
+        all_ops.extend(build_inject_ops(name, ws, skip_infra=(i > 0), tool_entry=entry))
+
+    tool_names = ", ".join(name for name, _ in to_inject)
+    info(f"Injecting {tool_names}...")
+    patch_workspace(all_ops)
+    info(f"Injected {tool_names}. Workspace is restarting...")
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -592,6 +798,8 @@ def main():
     elif args.command == "remove":
         validate_tools(args.tools)
         cmd_remove(args.tools, args.hot)
+    elif args.command == "init":
+        cmd_init(args.dry_run)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,57 @@ Features:
 
 See [inject-tool/README.md](inject-tool/README.md) for details.
 
+### Project-Scoped Tool Injection
+
+To declare tools for automatic injection when a workspace starts, create `.che/inject-tools.json` in your project repository:
+
+```json
+{
+  "tools": [
+    "opencode",
+    "tmux",
+    {
+      "name": "dev-tools",
+      "image": "quay.io/myorg/my-project-tools:latest",
+      "binaries": [
+        { "src": "/usr/bin/git", "binary": "git" },
+        { "src": "/usr/bin/jq", "binary": "jq" }
+      ]
+    }
+  ]
+}
+```
+
+**Tool formats:**
+- **String** (registry tool): `"opencode"` — looks up the tool in `inject-tool/registry.json`
+- **Object** (custom tool): Full tool definition with required fields `name`, `image`, `binaries`
+
+**Required fields for custom tools:**
+- `name` — tool identifier (used for init container and volume mount names)
+- `image` — container image with the binaries
+- `binaries` — array of `{ "src": "<path-in-image>", "binary": "<name-in-PATH>" }` objects
+
+**Optional fields for custom tools:**
+- `description` — human-readable description (shown in `inject-tool list`)
+- `env` — array of `{ "name": "<VAR>", "value": "<value>" }` objects for environment variables
+- `postStart` — shell command to run after injection (e.g., config file generation)
+- `memoryLimit` — memory bump for the editor container (e.g., `"512Mi"` for bundle tools)
+
+**Usage:**
+
+```bash
+inject-tool init          # Scan /projects/*/.che/inject-tools.json and inject declared tools
+inject-tool init --dry-run # Preview what would be injected without applying changes
+```
+
+The `init` subcommand is idempotent — safe to run multiple times. It only triggers a workspace restart if new tools are added.
+
+Override the config file path with the `INJECT_TOOLS_CONFIG` environment variable:
+
+```bash
+INJECT_TOOLS_CONFIG=/path/to/custom-config.json inject-tool init
+```
+
 ## Building
 
 ```bash
