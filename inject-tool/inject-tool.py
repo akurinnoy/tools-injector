@@ -422,8 +422,8 @@ def cmd_list():
         print(f"{tool:<15s} {pattern:<10s} {status}")
 
 
-def build_inject_ops(tool, ws, skip_infra=False):
-    reg_tool = REGISTRY_DATA["tools"][tool]
+def build_inject_ops(tool, ws, skip_infra=False, tool_entry=None):
+    reg_tool = tool_entry if tool_entry else REGISTRY_DATA["tools"][tool]
     pattern = reg_tool["pattern"]
     binary_name = reg_tool["binary"]
     ops = []
@@ -514,10 +514,17 @@ def build_inject_ops(tool, ws, skip_infra=False):
     if editor_name:
         symlink_cmd_id = f"symlink-{tool}"
         if find_command_index(ws, symlink_cmd_id) is None:
-            if pattern == "init":
-                symlink_target = f"/injected-tools/{binary_name}"
-            else:
-                symlink_target = f"/injected-tools/{tool}/bin/{binary_name}"
+            # Collect all binaries to symlink
+            all_binaries = reg_tool.get("_binaries", [{"src": reg_tool["src"], "binary": binary_name}])
+
+            symlink_parts = []
+            for b in all_binaries:
+                b_name = b["binary"]
+                if pattern == "init":
+                    symlink_target = f"/injected-tools/{b_name}"
+                else:
+                    symlink_target = f"/injected-tools/{tool}/bin/{b_name}"
+                symlink_parts.append(f"ln -sf {symlink_target} /injected-tools/bin/{b_name}")
 
             path_cmd = (
                 'grep -q injected-tools /etc/profile.d/injected-tools.sh 2>/dev/null'
@@ -527,7 +534,7 @@ def build_inject_ops(tool, ws, skip_infra=False):
             )
             cmdline = (
                 f"mkdir -p /injected-tools/bin && "
-                f"ln -sf {symlink_target} /injected-tools/bin/{binary_name} && "
+                f"{' && '.join(symlink_parts)} && "
                 f"{path_cmd}"
             )
             setup_cmd = reg_tool["editor"].get("postStart", "")
