@@ -1,16 +1,173 @@
 #!/bin/sh
-# inject-tool — finds python3 and exec's inject-tool.py
+# inject-tool — thin client for inject-tool-service
 # Delivered via ConfigMap automount to /usr/local/bin/inject-tool
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+set -e
 
-if command -v python3 >/dev/null 2>&1; then
-  exec python3 "${SCRIPT_DIR}/inject-tool.py" "$@"
-elif [ -x /injected-tools/bin/python3 ]; then
-  exec /injected-tools/bin/python3 "${SCRIPT_DIR}/inject-tool.py" "$@"
-else
-  echo "ERROR: python3 not found." >&2
-  echo "Install python3 or inject it first: inject-tool python3" >&2
-  echo "(You'll need to run 'inject-tool python3' from a workspace that has python3.)" >&2
-  exit 1
-fi
+SERVICE_URL="${INJECT_TOOL_SERVICE_URL:-http://inject-tool-service:8080}"
+WS_NAME="${DEVWORKSPACE_NAME}"
+WS_NS="${DEVWORKSPACE_NAMESPACE}"
+
+die() { echo "ERROR: $1" >&2; exit 1; }
+
+# Check required env vars
+[ -n "$WS_NAME" ] || die "DEVWORKSPACE_NAME not set. Are you running inside a Che workspace?"
+[ -n "$WS_NS" ] || die "DEVWORKSPACE_NAMESPACE not set. Are you running inside a Che workspace?"
+
+# HTTP helpers: try curl, fall back to wget
+http_get() {
+    url="$1"
+    if command -v curl >/dev/null 2>&1; then
+        curl -sf "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- "$url"
+    else
+        die "Neither curl nor wget found."
+    fi
+}
+
+http_post() {
+    url="$1"
+    body="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -sf -X POST -H "Content-Type: application/json" -d "$body" "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        echo "$body" | wget -qO- --post-data="$(cat)" --header="Content-Type: application/json" "$url"
+    else
+        die "Neither curl nor wget found."
+    fi
+}
+
+# Extract message from JSON response (simple grep, no jq needed)
+extract_message() {
+    echo "$1" | sed -n 's/.*"message" *: *"\([^"]*\)".*/\1/p'
+}
+
+extract_status() {
+    echo "$1" | sed -n 's/.*"status" *: *"\([^"]*\)".*/\1/p'
+}
+
+# Format and display list response
+display_list() {
+    response="$1"
+    printf "%-15s %-10s %s\n" "Tool" "Pattern" "Status"
+    printf "%-15s %-10s %s\n" "----" "-------" "------"
+    echo "$response" | sed 's/},{/}\n{/g' | while IFS= read -r line; do
+        name=$(echo "$line" | sed -n 's/.*"name" *: *"\([^"]*\)".*/\1/p')
+        pattern=$(echo "$line" | sed -n 's/.*"pattern" *: *"\([^"]*\)".*/\1/p')
+        injected=$(echo "$line" | sed -n 's/.*"injected" *: *\([a-z]*\).*/\1/p')
+        [ -z "$name" ] && continue
+        if [ "$injected" = "true" ]; then
+            status="injected"
+        else
+            status="not injected"
+        fi
+        printf "%-15s %-10s %s\n" "$name" "$pattern" "$status"
+    done
+}
+
+# Build JSON array from init configs
+build_init_payload() {
+    dry_run="$1"
+    projects_dir="${PROJECTS_DIR:-/projects}"
+    configs=""
+    sep=""
+    for f in "$projects_dir"/*/.che/inject-tools.json; do
+        [ -f "$f" ] || continue
+        project=$(basename "$(dirname "$(dirname "$f")")")
+        content=$(cat "$f")
+        tools=$(echo "$content" | sed -n 's/.*"tools" *: *\(\[.*\]\).*/\1/p')
+        [ -z "$tools" ] && continue
+        configs="${configs}${sep}{\"project\":\"${project}\",\"tools\":${tools}}"
+        sep=","
+    done
+    if [ -z "$configs" ]; then
+        echo ""
+        return
+    fi
+    echo "{\"workspace\":\"${WS_NAME}\",\"namespace\":\"${WS_NS}\",\"configs\":[${configs}],\"dry_run\":${dry_run}}"
+}
+
+# Parse arguments
+command=""
+tools=""
+dry_run="false"
+
+case "${1:-}" in
+    list)
+        command="list"
+        ;;
+    remove)
+        command="remove"
+        shift
+        tools="$*"
+        [ -n "$tools" ] || die "Usage: inject-tool remove <tool> [tool2...]"
+        ;;
+    init)
+        command="init"
+        shift
+        for arg in "$@"; do
+            case "$arg" in
+                --dry-run) dry_run="true" ;;
+                *) die "Unknown option: $arg" ;;
+            esac
+        done
+        ;;
+    -h|--help|"")
+        echo "Usage: inject-tool <tool> [tool2...]"
+        echo "       inject-tool list"
+        echo "       inject-tool remove <tool> [tool2...]"
+        echo "       inject-tool init [--dry-run]"
+        exit 0
+        ;;
+    -*)
+        die "Unknown option: $1"
+        ;;
+    *)
+        command="inject"
+        tools="$*"
+        ;;
+esac
+
+# Execute command
+case "$command" in
+    list)
+        response=$(http_get "${SERVICE_URL}/list?workspace=${WS_NAME}&namespace=${WS_NS}")
+        display_list "$response"
+        ;;
+    inject)
+        # Build JSON array of tool names
+        json_tools=""
+        sep=""
+        for t in $tools; do
+            json_tools="${json_tools}${sep}\"${t}\""
+            sep=","
+        done
+        body="{\"workspace\":\"${WS_NAME}\",\"namespace\":\"${WS_NS}\",\"tools\":[${json_tools}]}"
+        response=$(http_post "${SERVICE_URL}/inject" "$body")
+        msg=$(extract_message "$response")
+        echo "==> ${msg:-Done}"
+        ;;
+    remove)
+        json_tools=""
+        sep=""
+        for t in $tools; do
+            json_tools="${json_tools}${sep}\"${t}\""
+            sep=","
+        done
+        body="{\"workspace\":\"${WS_NAME}\",\"namespace\":\"${WS_NS}\",\"tools\":[${json_tools}]}"
+        response=$(http_post "${SERVICE_URL}/remove" "$body")
+        msg=$(extract_message "$response")
+        echo "==> ${msg:-Done}"
+        ;;
+    init)
+        body=$(build_init_payload "$dry_run")
+        if [ -z "$body" ]; then
+            echo "==> No .che/inject-tools.json found in ${PROJECTS_DIR:-/projects}/*/. Nothing to do."
+            exit 0
+        fi
+        response=$(http_post "${SERVICE_URL}/init" "$body")
+        msg=$(extract_message "$response")
+        echo "==> ${msg:-Done}"
+        ;;
+esac
