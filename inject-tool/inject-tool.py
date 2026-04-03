@@ -2,6 +2,7 @@
 """inject-tool — dynamically inject CLI tools into DevWorkspaces."""
 
 import argparse
+import copy
 import json
 import os
 import ssl
@@ -10,29 +11,40 @@ import sys
 import urllib.request
 
 # ============================================================================
-# Tool registry
+# Tool registry (loaded from registry.json at startup)
 # ============================================================================
-TOOLS = {
-    "opencode":    {"pattern": "init",   "src": "/usr/local/bin/opencode", "binary": "opencode"},
-    "goose":       {"pattern": "init",   "src": "/usr/local/bin/goose",    "binary": "goose"},
-    "claude-code": {"pattern": "init",   "src": "/usr/local/bin/claude",   "binary": "claude"},
-    "kilocode":    {"pattern": "bundle", "src": "/opt/kilocode",           "binary": "kilo"},
-    "gemini-cli":  {"pattern": "bundle", "src": "/opt/gemini-cli",         "binary": "gemini"},
-    "tmux":        {"pattern": "init",   "src": "/usr/local/bin/tmux",     "binary": "tmux"},
-    "python3":     {"pattern": "init",   "src": "/usr/local/bin/python3",  "binary": "python3"},
-}
+def _registry_path():
+    override = os.environ.get("INJECT_TOOL_REGISTRY_FILE")
+    if override:
+        return override
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "registry.json")
 
-TOOL_ENV = {
-    "gemini-cli": "GEMINI_CLI_HOME=/tmp/gemini-home",
-    "claude-code": "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-}
 
-TOOL_SETUP = {
-    "gemini-cli": 'mkdir -p /tmp/gemini-home/.gemini && echo \'{"projects":{}}\' > /tmp/gemini-home/.gemini/projects.json',
-}
+def load_registry():
+    path = _registry_path()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except OSError as e:
+        print(f"ERROR: Cannot read registry file at {path}: {e}", file=sys.stderr)
+        print("Set INJECT_TOOL_REGISTRY_FILE to override the path.", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: registry.json is not valid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
 
-REGISTRY = os.environ.get("INJECT_TOOL_REGISTRY", "quay.io/okurinny")
-TAG = os.environ.get("INJECT_TOOL_TAG", "next")
+    for key in ("registry", "tag", "tools"):
+        if key not in data:
+            print(f"ERROR: registry.json is missing required key '{key}'", file=sys.stderr)
+            sys.exit(1)
+
+    return data
+
+
+REGISTRY_DATA = load_registry()
+
+_base_registry = os.environ.get("INJECT_TOOL_REGISTRY") or REGISTRY_DATA["registry"]
+_base_tag = os.environ.get("INJECT_TOOL_TAG") or REGISTRY_DATA["tag"]
 
 
 # ============================================================================
@@ -48,16 +60,17 @@ def info(msg):
 
 
 def tool_image(tool):
-    return f"{REGISTRY}/tools-injector/{tool}:{TAG}"
+    return f"{_base_registry}/tools-injector/{tool}:{_base_tag}"
 
 
 def validate_tools(tool_names):
+    tools = REGISTRY_DATA["tools"]
     for name in tool_names:
-        if name not in TOOLS:
+        if name not in tools:
             print(f"Unknown tool: {name}\n", file=sys.stderr)
             print("Available tools:", file=sys.stderr)
-            for t in sorted(TOOLS):
-                print(f"  {t:<15s} {TOOLS[t]['pattern']}", file=sys.stderr)
+            for t in sorted(tools):
+                print(f"  {t:<15s} {tools[t]['pattern']}", file=sys.stderr)
             sys.exit(1)
 
 
@@ -251,20 +264,17 @@ def cmd_list():
     ws = fetch_workspace()
     print(f"{'Tool':<15s} {'Pattern':<10s} {'Status'}")
     print(f"{'----':<15s} {'-------':<10s} {'------'}")
-    for tool in sorted(TOOLS):
-        pattern = TOOLS[tool]["pattern"]
+    for tool in sorted(REGISTRY_DATA["tools"]):
+        pattern = REGISTRY_DATA["tools"][tool]["pattern"]
         comp_name = f"{tool}-injector"
         status = "injected" if find_component_index(ws, comp_name) is not None else "not injected"
         print(f"{tool:<15s} {pattern:<10s} {status}")
 
 
 def build_inject_ops(tool, ws, skip_infra=False):
-    t = TOOLS[tool]
-    pattern = t["pattern"]
-    image = tool_image(tool)
-    comp_name = f"{tool}-injector"
-    binary_src = t["src"]
-    binary_name = t["binary"]
+    reg_tool = REGISTRY_DATA["tools"][tool]
+    pattern = reg_tool["pattern"]
+    binary_name = reg_tool["binary"]
     ops = []
 
     editor = find_editor(ws)
@@ -273,57 +283,50 @@ def build_inject_ops(tool, ws, skip_infra=False):
 
     # 1. Add injected-tools volume if missing
     if not skip_infra and find_component_index(ws, "injected-tools") is None:
-        ops.append({"op": "add", "path": "/spec/template/components/-",
-                     "value": {"name": "injected-tools", "volume": {"size": "256Mi"}}})
+        ops.extend(copy.deepcopy(REGISTRY_DATA["infrastructure"]["patch"]))
 
-    # 2. Add injector component
-    if pattern == "init":
-        ops.append({"op": "add", "path": "/spec/template/components/-",
-                     "value": {"name": comp_name, "container": {
-                         "image": image, "command": ["/bin/cp"],
-                         "args": [binary_src, f"/injected-tools/{binary_name}"],
-                         "memoryLimit": "128Mi", "mountSources": False,
-                         "volumeMounts": [{"name": "injected-tools", "path": "/injected-tools"}]}}})
-    else:
-        ops.append({"op": "add", "path": "/spec/template/components/-",
-                     "value": {"name": comp_name, "container": {
-                         "image": image, "command": ["/bin/sh"],
-                         "args": ["-c", f"cp -a {binary_src}/. /injected-tools/{tool}/"],
-                         "memoryLimit": "256Mi", "mountSources": False,
-                         "volumeMounts": [{"name": "injected-tools", "path": "/injected-tools"}]}}})
+    # 2. Add injector component from registry patch (with image override)
+    patch_ops = copy.deepcopy(reg_tool["patch"])
+    for op in patch_ops:
+        if op.get("op") == "add" and isinstance(op.get("value"), dict):
+            container = op["value"].get("container", {})
+            if "image" in container:
+                container["image"] = tool_image(tool)
+    ops.extend(patch_ops)
 
     # 3. Add volume mount to editor
     if editor_idx is not None and not skip_infra:
         mounts = get_components(ws)[editor_idx].get("container", {}).get("volumeMounts", [])
         has_mount = any(m.get("name") == "injected-tools" for m in mounts)
         if not has_mount:
-            if mounts:
-                ops.append({"op": "add",
-                             "path": f"/spec/template/components/{editor_idx}/container/volumeMounts/-",
-                             "value": {"name": "injected-tools", "path": "/injected-tools"}})
-            else:
-                ops.append({"op": "add",
-                             "path": f"/spec/template/components/{editor_idx}/container/volumeMounts",
-                             "value": [{"name": "injected-tools", "path": "/injected-tools"}]})
+            for vm in reg_tool["editor"]["volumeMounts"]:
+                if mounts:
+                    ops.append({"op": "add",
+                                 "path": f"/spec/template/components/{editor_idx}/container/volumeMounts/-",
+                                 "value": vm})
+                else:
+                    ops.append({"op": "add",
+                                 "path": f"/spec/template/components/{editor_idx}/container/volumeMounts",
+                                 "value": [vm]})
+                    mounts = [vm]
     elif editor_idx is None and not skip_infra:
         print("WARNING: Could not find editor component. You may need to add the volume mount manually.",
               file=sys.stderr)
 
     # 3b. Add tool-specific env vars
-    if editor_idx is not None and tool in TOOL_ENV:
+    if editor_idx is not None and reg_tool["editor"]["env"]:
         env_list = get_components(ws)[editor_idx].get("container", {}).get("env")
         env_exists = env_list is not None and len(env_list) > 0
-        for i, pair in enumerate(TOOL_ENV[tool].split(";")):
-            name, value = pair.split("=", 1)
+        for i, env_var in enumerate(reg_tool["editor"]["env"]):
             if not skip_infra and not env_exists and i == 0:
                 ops.append({"op": "add",
                              "path": f"/spec/template/components/{editor_idx}/container/env",
-                             "value": [{"name": name, "value": value}]})
+                             "value": [env_var]})
                 env_exists = True
             else:
                 ops.append({"op": "add",
                              "path": f"/spec/template/components/{editor_idx}/container/env/-",
-                             "value": {"name": name, "value": value}})
+                             "value": env_var})
 
     # 3c. Memory bump for bundle tools
     if not skip_infra and editor_idx is not None and pattern == "bundle":
@@ -342,10 +345,10 @@ def build_inject_ops(tool, ws, skip_infra=False):
     commands = ws.get("spec", {}).get("template", {}).get("commands")
     if skip_infra or commands is not None:
         ops.append({"op": "add", "path": "/spec/template/commands/-",
-                     "value": {"id": f"install-{tool}", "apply": {"component": comp_name}}})
+                     "value": {"id": f"install-{tool}", "apply": {"component": f"{tool}-injector"}}})
     else:
         ops.append({"op": "add", "path": "/spec/template/commands",
-                     "value": [{"id": f"install-{tool}", "apply": {"component": comp_name}}]})
+                     "value": [{"id": f"install-{tool}", "apply": {"component": f"{tool}-injector"}}]})
 
     # 5. Add preStart event
     prestart = get_events(ws).get("preStart")
@@ -371,9 +374,14 @@ def build_inject_ops(tool, ws, skip_infra=False):
                 ' grep -q injected-tools "$HOME/.bashrc" 2>/dev/null'
                 ' || echo \'export PATH="/injected-tools/bin:$PATH"\' >> "$HOME/.bashrc" 2>/dev/null; true'
             )
-            cmdline = f"mkdir -p /injected-tools/bin && ln -sf {symlink_target} /injected-tools/bin/{binary_name} && {path_cmd}"
-            if tool in TOOL_SETUP:
-                cmdline = f"{TOOL_SETUP[tool]} && {cmdline}"
+            cmdline = (
+                f"mkdir -p /injected-tools/bin && "
+                f"ln -sf {symlink_target} /injected-tools/bin/{binary_name} && "
+                f"{path_cmd}"
+            )
+            setup_cmd = reg_tool["editor"].get("postStart", "")
+            if setup_cmd:
+                cmdline = f"{setup_cmd} && {cmdline}"
 
             ops.append({"op": "add", "path": "/spec/template/commands/-",
                          "value": {"id": symlink_cmd_id, "exec": {
@@ -391,15 +399,15 @@ def build_inject_ops(tool, ws, skip_infra=False):
 
 
 def hot_inject(tool):
-    t = TOOLS[tool]
-    if t["pattern"] != "init":
+    reg_tool = REGISTRY_DATA["tools"][tool]
+    if reg_tool["pattern"] != "init":
         die(f"--hot is only supported for init container tools. Use 'inject-tool {tool}' (without --hot) instead.")
     if subprocess.run(["which", "oc"], capture_output=True).returncode != 0:
         die(f"--hot mode requires the 'oc' CLI. Use 'inject-tool {tool}' (without --hot) for default mode.")
 
     image = tool_image(tool)
-    binary_src = t["src"]
-    binary_name = t["binary"]
+    binary_src = reg_tool["src"]
+    binary_name = reg_tool["binary"]
 
     os.makedirs("/injected-tools", exist_ok=True)
     info(f"Extracting {binary_name} from {image}...")
@@ -441,7 +449,7 @@ def cmd_inject(tools, hot):
         all_ops.extend(build_inject_ops(tool, ws, skip_infra=(i > 0)))
 
     # Fix memory bump for multiple bundle tools
-    bundle_count = sum(1 for t in to_inject if TOOLS[t]["pattern"] == "bundle")
+    bundle_count = sum(1 for t in to_inject if REGISTRY_DATA["tools"][t]["pattern"] == "bundle")
     if bundle_count > 1:
         editor = find_editor(ws)
         if editor:
@@ -471,7 +479,6 @@ def cmd_inject(tools, hot):
 def build_remove_ops(tool, ws, also_removing=None):
     if also_removing is None:
         also_removing = []
-    t = TOOLS[tool]
     comp_name = f"{tool}-injector"
     ops = []
 
@@ -547,10 +554,10 @@ def cmd_remove(tools, hot):
         if len(tools) > 1:
             die("--hot does not support multiple tools.")
         tool = tools[0]
-        t = TOOLS[tool]
-        if t["pattern"] != "init":
+        reg_tool = REGISTRY_DATA["tools"][tool]
+        if reg_tool["pattern"] != "init":
             die("--hot remove is only supported for init container tools.")
-        binary_path = f"/injected-tools/{t['binary']}"
+        binary_path = f"/injected-tools/{reg_tool['binary']}"
         if os.path.exists(binary_path):
             os.remove(binary_path)
         info(f"Removed {binary_path}")
